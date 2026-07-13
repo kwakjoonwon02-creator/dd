@@ -1,0 +1,137 @@
+services:
+  invidious:
+    image: quay.io/invidious/invidious:latest
+    restart: unless-stopped
+    environment:
+      INVIDIOUS_CONFIG: |
+        db:
+          dbname: invidious
+          user: kemal
+          password: "${POSTGRES_PASSWORD}"
+          host: invidious-db
+          port: 5432
+        check_tables: true
+        invidious_companion:
+          - private_url: "http://companion:8282/companion"
+        invidious_companion_key: "${COMPANION_KEY}"
+        domain: "${DOMAIN}"
+        external_port: 443
+        https_only: true
+        statistics_enabled: false
+        registration_enabled: false
+        hmac_key: "${HMAC_KEY}"
+        default_user_preferences:
+          local: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/v1/stats || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 45s
+    depends_on:
+      invidious-db:
+        condition: service_healthy
+      companion:
+        condition: service_started
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "4"
+
+  companion:
+    image: quay.io/invidious/invidious-companion:latest
+    restart: unless-stopped
+    environment:
+      SERVER_SECRET_KEY: "${COMPANION_KEY}"
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - companioncache:/var/tmp/youtubei.js:rw
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "4"
+
+  invidious-db:
+    image: postgres:14
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: invidious
+      POSTGRES_USER: kemal
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - postgresdata:/var/lib/postgresql/data
+      - ./invidious-src/config/sql:/config/sql:ro
+      - ./invidious-src/docker/init-invidious-db.sh:/docker-entrypoint-initdb.d/init-invidious-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "4"
+
+  relay:
+    build:
+      context: ./relay
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      INVIDIOUS_INTERNAL_URL: "http://invidious:3000"
+      RELAY_KEY: "${RELAY_KEY}"
+      MAX_MEDIA_BYTES: "${MAX_MEDIA_BYTES:-1073741824}"
+      MAX_RANGE_BYTES: "1048576"
+      REQUESTS_PER_MINUTE: "1200"
+      MAX_CONCURRENT_REQUESTS: "48"
+    depends_on:
+      invidious:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "4"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: "${DOMAIN}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      relay:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      options:
+        max-size: "100m"
+        max-file: "4"
+
+volumes:
+  postgresdata:
+  companioncache:
+  caddydata:
+  caddyconfig:
